@@ -151,6 +151,31 @@ func TestListen_NotUDPConn(t *testing.T) {
 	}
 }
 
+// TestDefaultSyscalls_NewConn exercises the real fd-adoption closure
+// (os.NewFile + net.FilePacketConn) that the production seam uses. We
+// open a genuine UDP socket bound to an ephemeral loopback port — no
+// privilege required — and hand its fd to newConn.
+func TestDefaultSyscalls_NewConn(t *testing.T) {
+	sc := defaultSyscalls()
+	fd, err := sc.socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP)
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	if err := sc.bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		_ = sc.closeFD(fd)
+		t.Fatalf("bind: %v", err)
+	}
+	c, err := sc.newConn(fd, "dhcp-test")
+	if err != nil {
+		_ = sc.closeFD(fd)
+		t.Fatalf("newConn: %v", err)
+	}
+	if _, ok := c.(*net.UDPConn); !ok {
+		t.Errorf("newConn returned %T, want *net.UDPConn", c)
+	}
+	_ = c.Close()
+}
+
 func TestListen_Success(t *testing.T) {
 	uc := mustUDPConn(t)
 	defer uc.Close()
@@ -226,6 +251,12 @@ func TestRun_RecvLoopAndCancel(t *testing.T) {
 	rbuf := make([]byte, 1500)
 	if _, _, err := rcv.ReadFromUDP(rbuf); err != nil {
 		t.Fatalf("expected OFFER on rcv: %v", err)
+	}
+	// The offer metric is recorded by the server goroutine just after
+	// the reply is sent, so poll for it rather than racing the read.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && m.count(OutcomeOffer) < 1 {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if m.count(OutcomeOffer) != 1 {
 		t.Errorf("offer metric = %d, want 1", m.count(OutcomeOffer))
